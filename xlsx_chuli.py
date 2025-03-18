@@ -55,9 +55,10 @@ ISO2_TO_CHINESE = {
     'UA': '乌克兰', 'UG': '乌干达', 'UM': '美国本土外小岛屿', 'US': '美国', 'UY': '乌拉圭',
     'UZ': '乌兹别克斯坦', 'VA': '梵蒂冈', 'VC': '圣文森特和格林纳丁斯', 'VE': '委内瑞拉',
     'VG': '英属维尔京群岛', 'VI': '美属维尔京群岛', 'VN': '越南', 'VU': '瓦努阿图',
-    'WF': '瓦利斯和富图纳', 'WS': '萨摩亚', 'YE': '也门', 'YT': '马约特', 'ZA': '南非',
+    'WF': '瓦利斯和富图纳', 'WS': '萨摩亚', 'XK': '科索沃', 'YE': '也门', 'YT': '马约特', 'ZA': '南非',
     'ZM': '赞比亚', 'ZW': '津巴布韦'
 }
+
 
 def process_excel(input_path, output_path):
     error_patterns = [
@@ -67,22 +68,25 @@ def process_excel(input_path, output_path):
     error_regex = r'|'.join([re.escape(p) for p in error_patterns])
     number_regex = r'^[+-]?\d+\.?\d*$'
 
-    # 保留原始NA字符串
+    # 读取时保留原始空值表示
     sheets = pd.read_excel(input_path, sheet_name=None, keep_default_na=False)
 
     for sheet_name, df in sheets.items():
         # ========== 列结构处理 ==========
+        # 插入"国家是否一致"列
         return_country_idx = df.columns.get_loc('返回国家')
         df.insert(return_country_idx + 1, '国家是否一致', '')
 
+        # 插入延迟相关列
         delay_idx = df.columns.get_loc('延迟')
         df.insert(delay_idx + 1, '总平均延迟', np.nan)
         df.insert(delay_idx + 2, '空列', '')
 
+        # 插入分析列
         empty_col_idx = df.columns.get_loc('空列')
         analysis_columns = [
             ('国家列表', ''),
-            ('国家名称', ''),  # 新增中文名称列
+            ('国家名称', ''),
             ('请求次数', np.nan),
             ('国家不一致次数', np.nan),
             ('平均延迟', np.nan),
@@ -95,13 +99,22 @@ def process_excel(input_path, output_path):
 
         # ========== 数据处理 ==========
         def process_delay(value):
+            """处理延迟列，提取有效数值"""
             if pd.isna(value) or re.search(error_regex, str(value), re.IGNORECASE):
                 return np.nan
-            match = re.match(number_regex, str(value).strip())
-            return float(match.group()) if match else np.nan
+            str_value = str(value).strip()
+            # 修改正则表达式匹配逻辑
+            match = re.search(r'([+-]?\d+\.?\d*)', str_value)  # 去掉了^和$，允许包含其他字符
+            if match:
+                try:
+                    return float(match.group(1))
+                except:
+                    return np.nan
+            return np.nan
 
         df['有效延迟'] = df['延迟'].apply(process_delay)
 
+        # 计算国家一致性
         valid_mask = df['有效延迟'].notna()
         df.loc[valid_mask, '国家是否一致'] = np.where(
             df.loc[valid_mask, '请求国家'].astype(str).str.strip().str.upper() ==
@@ -136,39 +149,41 @@ def process_excel(input_path, output_path):
                 if row['国家是否一致'] == '否':
                     data['mismatch'] += 1
 
+        # 生成国家列表
         sorted_countries = sorted(country_data.keys())
-        # 关键修改：使用映射表转换中文名称
         chinese_names = [ISO2_TO_CHINESE.get(c.upper(), '未知国家') for c in sorted_countries]
 
-        # 填充国家列表和中文名称列
+        # 填充国家信息
         df['国家列表'] = pd.Series(sorted_countries + [''] * (len(df) - len(sorted_countries)))
         df['国家名称'] = pd.Series(chinese_names + [''] * (len(df) - len(sorted_countries)))
 
+        # 计算统计指标
         for i, country in enumerate(sorted_countries):
             if i >= len(df):
-                # 若国家数超过数据行数，扩展DataFrame
-                additional_rows = pd.DataFrame([{}] * (i + 1 - len(df)))
-                df = pd.concat([df, additional_rows], ignore_index=True)
+                df = pd.concat([df, pd.DataFrame([{}]*(i+1-len(df)))], ignore_index=True)
 
             data = country_data[country]
             valid_count = data['total'] - data['invalid']
 
+            # 计算各项指标
             avg_delay = np.mean(data['delays']).round(2) if data['delays'] else np.nan
-            repeat_rate = (valid_count - len(data['ips'])) / valid_count if valid_count > 0 else np.nan
-            failure_rate = data['invalid'] / data['total'] if data['total'] > 0 else np.nan
+            repeat_rate = (valid_count - len(data['ips'])) / valid_count if valid_count > 0 else 0.0
+            failure_rate = data['invalid'] / data['total'] if data['total'] > 0 else 0.0
 
-            df.at[i, '请求次数'] = data['total']
-            df.at[i, '国家不一致次数'] = data['mismatch']
-            df.at[i, '平均延迟'] = avg_delay
-            df.at[i, '独立IP数'] = len(data['ips'])
-            df.at[i, '重复率'] = repeat_rate
-            df.at[i, '请求失败率'] = failure_rate
+            # 强制转换为浮点数并限制范围
+            df.at[i, '请求次数'] = int(data['total'])
+            df.at[i, '国家不一致次数'] = int(data['mismatch'])
+            df.at[i, '平均延迟'] = float(avg_delay) if not pd.isna(avg_delay) else np.nan
+            df.at[i, '独立IP数'] = int(len(data['ips']))
+            df.at[i, '重复率'] = float(repeat_rate)
+            df.at[i, '请求失败率'] = float(failure_rate)
 
         df.drop('有效延迟', axis=1, inplace=True)
 
-    # ========== 输出处理 ==========
+    # ========== Excel输出处理 ==========
     with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
         for sheet_name, df in sheets.items():
+            # 列顺序整理
             base_columns = [
                 '请求国家', '大洲', '返回国家', '国家是否一致',
                 'IP', '延迟', '总平均延迟', '空列',
@@ -177,34 +192,45 @@ def process_excel(input_path, output_path):
             ]
             remaining = [col for col in df.columns if col not in base_columns]
             final_order = base_columns + remaining
+            df = df[final_order]
 
-            df[final_order].fillna('', inplace=False).to_excel(
-                writer, sheet_name=sheet_name, index=False
-            )
+            # 写入Excel
+            df.to_excel(writer, sheet_name=sheet_name, index=False, na_rep='')
 
+            # 获取工作簿和工作表对象
             workbook = writer.book
             worksheet = writer.sheets[sheet_name]
 
-
+            # 定义数字格式
             num_fmt = workbook.add_format({'num_format': '0.00'})
             percent_fmt = workbook.add_format({'num_format': '0.00%'})
             int_fmt = workbook.add_format({'num_format': '0'})
 
-            format_map = {
+            # 设置列格式
+            format_rules = {
                 '总平均延迟': num_fmt,
                 '平均延迟': num_fmt,
-                '重复率': percent_fmt,
-                '请求失败率': percent_fmt,
                 '请求次数': int_fmt,
                 '国家不一致次数': int_fmt,
-                '独立IP数': int_fmt
+                '独立IP数': int_fmt,
+                '重复率': percent_fmt,
+                '请求失败率': percent_fmt
             }
 
-            for col, fmt in format_map.items():
-                col_idx = df.columns.get_loc(col)
-                worksheet.set_column(col_idx, col_idx, None, fmt)
+            for col_name, fmt in format_rules.items():
+                col_idx = df.columns.get_loc(col_name)
+                # 设置整列格式（包含标题）
+                worksheet.set_column(col_idx, col_idx, 14, fmt)
+                # 重写数据确保格式应用
+                for row_idx in range(1, len(df)+1):
+                    cell_value = df.iloc[row_idx-1][col_name]
+                    if pd.notna(cell_value):
+                        worksheet.write(row_idx, col_idx, cell_value, fmt)
 
-            worksheet.set_column(0, len(df.columns) - 1, 14)
+            # 设置其他列的宽度
+            for col_idx in range(len(df.columns)):
+                if df.columns[col_idx] not in format_rules:
+                    worksheet.set_column(col_idx, col_idx, 14)
 
 if __name__ == "__main__":
-    process_excel("meiguo-0317.xlsx", "output-meiguo-0317.xlsx")
+    process_excel("meiguo_test.xlsx", "output_meiguo_test.xlsx")
